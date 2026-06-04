@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Mercer335/test/internal/signing"
+	"github.com/quilscan-com/quilscan-dev-node/internal/signing"
 )
 
 func main() {

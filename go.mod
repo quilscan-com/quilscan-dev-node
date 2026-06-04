@@ -1,3 +1,3 @@
-module github.com/Mercer335/test
+module github.com/quilscan-com/quilscan-dev-node
 
 go 1.22
