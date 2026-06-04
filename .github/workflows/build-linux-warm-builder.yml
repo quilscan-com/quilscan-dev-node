@@ -1,0 +1,118 @@
+name: Build Linux Warm Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_repo:
+        description: "Official upstream repository used for warm builder source"
+        required: true
+        default: "https://github.com/QuilibriumNetwork/monorepo.git"
+      upstream_branch:
+        description: "Official upstream branch used for warm builder source"
+        required: true
+        default: "v2.1.0.23"
+      builder_version:
+        description: "Warm builder version label"
+        required: true
+        default: "linux-warm-builder-v1"
+      platform:
+        description: "Target platform"
+        required: true
+        type: choice
+        options:
+          - linux-amd64
+        default: linux-amd64
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux-amd64:
+    if: ${{ inputs.platform == 'linux-amd64' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+
+      - name: Set up Go for signing tool
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Checkout upstream
+        run: |
+          git clone --branch "${{ inputs.upstream_branch }}" --single-branch "${{ inputs.upstream_repo }}" upstream
+          cd upstream
+          git lfs install --local
+          git lfs pull
+          git rev-parse HEAD > ../UPSTREAM_COMMIT
+          git status --short
+
+      - name: Free runner disk space
+        run: |
+          set -euo pipefail
+          echo "Disk before cleanup:"
+          df -h
+
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+
+          echo "Disk after cleanup:"
+          df -h
+
+      - name: Install archive tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y zstd
+
+      - name: Build Linux warm builder image archive
+        env:
+          PLATFORM: ${{ inputs.platform }}
+          LINUX_WARM_BUILDER_IMAGE_TAG: quilibrium-linux-warm-builder:linux-amd64-v1
+          LINUX_WARM_BUILDER_ARCHIVE: quilibrium-linux-warm-builder-linux-amd64.tar.zst
+        run: |
+          bash deps/linux-warm-builder/build-image.sh upstream dist
+
+      - name: Sign warm builder manifest
+        env:
+          BUILD_SIGNING_PRIVATE_KEY: ${{ secrets.DEV_NODE_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          archive="$(cat dist/linux-warm-builder-archive-name.txt)"
+          image_tag="$(cat dist/linux-warm-builder-image-tag.txt)"
+          go run ./cmd/dependency-manifest-sign \
+            -name quilibrium-linux-warm-builder \
+            -version "${{ inputs.builder_version }}" \
+            -platform "${{ inputs.platform }}" \
+            -archive "dist/$archive" \
+            -source-repo "${{ inputs.upstream_repo }}" \
+            -source-ref "${{ inputs.upstream_branch }}" \
+            -source-commit "$(cat UPSTREAM_COMMIT)" \
+            -metadata "image_tag=$image_tag" \
+            -metadata "warm_source_dir=/opt/monorepo" \
+            -metadata "build_repository=${{ github.repository }}" \
+            -metadata "build_commit=${{ github.sha }}" \
+            -metadata "dockerfile=deps/linux-warm-builder/Dockerfile" \
+            -metadata "base_image=ubuntu:24.04" \
+            -out-dir dist
+          cat dist/manifest.json
+          cat dist/manifest.json.sig
+          cat dist/public-key.txt
+
+      - name: Upload Linux warm builder artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-warm-builder-amd64
+          path: |
+            dist/quilibrium-linux-warm-builder-linux-amd64.tar.zst
+            dist/manifest.json
+            dist/manifest.json.sig
+            dist/public-key.txt
+          if-no-files-found: error

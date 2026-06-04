@@ -1,0 +1,443 @@
+name: Build Quilibrium Dev Node
+run-name: quil-node ${{ inputs.platform }} ${{ inputs.dispatch_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: "Quil builder server build_run id"
+        required: false
+        default: ""
+      dispatch_id:
+        description: "Unique dispatch id for server run binding"
+        required: false
+        default: ""
+      upstream_repo:
+        description: "Official upstream repository"
+        required: true
+        default: "https://github.com/QuilibriumNetwork/monorepo.git"
+      upstream_branch:
+        description: "Official upstream branch to build"
+        required: true
+        default: "v2.1.0.23"
+      platform:
+        description: "Target platform"
+        required: true
+        type: choice
+        options:
+          - linux-amd64
+          - darwin-arm64
+        default: linux-amd64
+      linux_warm_builder_base_url:
+        description: "Signed Linux warm builder image base URL"
+        required: true
+        default: "https://releases.quilscan.com/deps/linux-warm-builder/amd64"
+      macos_flint_repo:
+        description: "FLINT source repository for macOS"
+        required: true
+        default: "https://github.com/flintlib/flint.git"
+      macos_flint_ref:
+        description: "FLINT source ref for macOS"
+        required: true
+        default: "flint-3.0"
+      use_macos_cache:
+        description: "Use macOS Homebrew and Cargo GitHub Actions caches"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux-amd64:
+    if: ${{ inputs.platform == 'linux-amd64' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+
+      - name: Set up Go for signing tool
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Free runner disk space
+        run: |
+          set -euo pipefail
+          echo "Disk before cleanup:"
+          df -h
+
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+
+          echo "Disk after cleanup:"
+          df -h
+
+      - name: Install signed builder archive tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y zstd
+
+      - name: Download signed Linux warm builder image
+        env:
+          PLATFORM: linux-amd64
+          LINUX_WARM_BUILDER_IMAGE_TAG: quilibrium-linux-warm-builder:linux-amd64-v1
+        run: |
+          bash deps/linux-warm-builder/download-signed.sh "${{ inputs.linux_warm_builder_base_url }}" linux-warm-builder-download
+
+      - name: Build node with signed Linux warm builder
+        env:
+          LINUX_WARM_BUILDER_IMAGE_TAG: quilibrium-linux-warm-builder:linux-amd64-v1
+          UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+          UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
+        run: |
+          set -euo pipefail
+          mkdir -p warm-output
+          docker run --rm \
+            --platform linux/amd64 \
+            --ulimit stack=-1:-1 \
+            -e UPSTREAM_REPO \
+            -e UPSTREAM_BRANCH \
+            -v "$PWD/warm-output:/out" \
+            "$LINUX_WARM_BUILDER_IMAGE_TAG" \
+            bash -lc '
+              set -euo pipefail
+              cd /opt/monorepo
+              git remote set-url origin "$UPSTREAM_REPO"
+              git lfs install --local --force
+              git reset --hard
+              git fetch origin "$UPSTREAM_BRANCH"
+              if git show-ref --verify --quiet "refs/heads/$UPSTREAM_BRANCH"; then
+                git checkout "$UPSTREAM_BRANCH"
+              else
+                git checkout -B "$UPSTREAM_BRANCH" "origin/$UPSTREAM_BRANCH"
+              fi
+              git reset --hard
+              git pull --ff-only origin "$UPSTREAM_BRANCH"
+              git lfs pull
+              git rev-parse HEAD > /out/UPSTREAM_COMMIT
+              quilscan-build-node-linux-official-local .
+              cp node/build/amd64_linux/node /out/node
+              chmod +x /out/node
+            '
+          cp warm-output/UPSTREAM_COMMIT UPSTREAM_COMMIT
+
+      - name: Show upstream revision
+        run: |
+          set -euo pipefail
+          echo "upstream_repo=${{ inputs.upstream_repo }}"
+          echo "upstream_branch=${{ inputs.upstream_branch }}"
+          echo "upstream_commit=$(cat UPSTREAM_COMMIT)"
+
+      - name: Package node from warm builder
+        env:
+          UPSTREAM_BASE_VERSION: ${{ inputs.upstream_branch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          upstream_commit="$(cat UPSTREAM_COMMIT)"
+          short_commit="${upstream_commit:0:7}"
+          base_version="${UPSTREAM_BASE_VERSION#v}"
+          name="node-${base_version}-${short_commit}-linux-amd64"
+          cp warm-output/node "dist/$name"
+          chmod +x "dist/$name"
+          echo "built $PWD/dist/$name"
+
+      - name: Write checksums and build info
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum node-* > SHA256SUMS
+          cd ..
+          cat > dist/build-info.json <<EOF
+          {
+            "channel": "dev",
+            "source_type": "quilscan_public_dev_build",
+            "official_release": false,
+            "upstream_repo": "${{ inputs.upstream_repo }}",
+            "upstream_branch": "${{ inputs.upstream_branch }}",
+            "upstream_commit": "$(cat UPSTREAM_COMMIT)",
+            "platform": "${{ inputs.platform }}",
+            "linux_warm_builder_base_url": "${{ inputs.linux_warm_builder_base_url }}",
+            "workflow_run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }
+          EOF
+          cat dist/build-info.json
+          cat dist/SHA256SUMS
+
+      - name: Sign node binary
+        env:
+          DEV_NODE_SIGNING_PRIVATE_KEY: ${{ secrets.DEV_NODE_SIGNING_PRIVATE_KEY }}
+        run: |
+          go run ./cmd/dev-node-sign \
+            -checksums dist/SHA256SUMS \
+            -out-dir dist
+          cat dist/node-*.sig
+          cat dist/public-key.txt
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-node-linux-amd64
+          path: |
+            dist/node-*
+            dist/SHA256SUMS
+            dist/build-info.json
+            dist/public-key.txt
+          if-no-files-found: error
+
+  build-darwin-arm64:
+    if: ${{ inputs.platform == 'darwin-arm64' }}
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+
+      - name: Set up Go for signing tool
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Checkout upstream
+        run: |
+          git clone --branch "${{ inputs.upstream_branch }}" --single-branch "${{ inputs.upstream_repo }}" upstream
+          cd upstream
+          git lfs install --local
+          git lfs pull
+          git rev-parse HEAD > ../UPSTREAM_COMMIT
+          git status --short
+
+      - name: Show upstream revision
+        run: |
+          set -euo pipefail
+          echo "upstream_repo=${{ inputs.upstream_repo }}"
+          echo "upstream_branch=${{ inputs.upstream_branch }}"
+          echo "upstream_commit=$(cat UPSTREAM_COMMIT)"
+
+      - name: Cache Homebrew downloads
+        if: ${{ inputs.use_macos_cache }}
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/Homebrew
+          key: ${{ runner.os }}-${{ runner.arch }}-homebrew-quilibrium-v1-${{ hashFiles('.github/workflows/build-dev-node.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-homebrew-quilibrium-v1-
+
+      - name: Install macOS build dependencies
+        run: |
+          set -euo pipefail
+          brew update
+          brew install gmp mpfr openssl@3 pkg-config protobuf autoconf automake libtool
+
+      - name: Cache Cargo registry
+        if: ${{ inputs.use_macos_cache }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-registry-${{ hashFiles('upstream/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-registry-
+
+      - name: Cache Cargo target
+        if: ${{ inputs.use_macos_cache }}
+        uses: actions/cache@v4
+        with:
+          path: upstream/target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-target-${{ inputs.upstream_branch }}-${{ hashFiles('UPSTREAM_COMMIT') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-target-${{ inputs.upstream_branch }}-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-target-
+
+      - name: Cache Rust binding generator
+        if: ${{ inputs.use_macos_cache }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/uniffi-bindgen-go
+          key: ${{ runner.os }}-${{ runner.arch }}-uniffi-bindgen-go-v0.4.0-v0.28.3
+
+      - name: Install Rust binding generator
+        run: |
+          set -euo pipefail
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          if ! command -v uniffi-bindgen-go >/dev/null 2>&1; then
+            cargo install uniffi-bindgen-go \
+              --git https://github.com/NordSecurity/uniffi-bindgen-go \
+              --tag "v0.4.0+v0.28.3"
+          fi
+          command -v uniffi-bindgen-go
+
+      - name: Cache macOS EMP build
+        if: ${{ inputs.use_macos_cache }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            upstream/emp-tool/build
+            upstream/emp-ot/build
+          key: ${{ runner.os }}-${{ runner.arch }}-emp-${{ hashFiles('upstream/emp-tool/**', 'upstream/emp-ot/**') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-emp-
+
+      - name: Install macOS EMP libraries
+        run: |
+          set -euo pipefail
+          cd upstream
+
+          openssl_dir="$(brew --prefix openssl@3)"
+          export OPENSSL_ROOT_DIR="$openssl_dir"
+          export CMAKE_PREFIX_PATH="/usr/local:$openssl_dir:${CMAKE_PREFIX_PATH:-}"
+
+          # crates/ferret/build.rs links libemp-tool from /usr/local/lib.
+          # Build from the checked-out upstream sources so the node source stays unmodified.
+          sudo mkdir -p /usr/local/lib /usr/local/include /usr/local/cmake
+          sed -i.bak 's/add_library(${NAME} SHARED ${sources})/add_library(${NAME} STATIC ${sources})/g' emp-tool/CMakeLists.txt
+
+          cmake -S emp-tool -B emp-tool/build \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DOPENSSL_ROOT_DIR="$openssl_dir" \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build emp-tool/build --parallel "$(sysctl -n hw.ncpu)"
+          sudo cmake --install emp-tool/build
+
+          cmake -S emp-ot -B emp-ot/build \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DOPENSSL_ROOT_DIR="$openssl_dir" \
+            -DCMAKE_PREFIX_PATH="/usr/local;$openssl_dir" \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build emp-ot/build --parallel "$(sysctl -n hw.ncpu)"
+          sudo cmake --install emp-ot/build
+
+          test -f /usr/local/lib/libemp-tool.a
+
+      - name: Resolve macOS FLINT source
+        env:
+          FLINT_REPO: ${{ inputs.macos_flint_repo }}
+          FLINT_REF: ${{ inputs.macos_flint_ref }}
+        run: |
+          set -euo pipefail
+          commit="$(
+            git ls-remote "$FLINT_REPO" \
+              "$FLINT_REF" \
+              "refs/heads/$FLINT_REF" \
+              "refs/tags/$FLINT_REF" \
+              "refs/tags/$FLINT_REF^{}" |
+              awk 'NF { print $1; exit }'
+          )"
+          if [[ -z "$commit" ]]; then
+            echo "could not resolve FLINT ref $FLINT_REF from $FLINT_REPO" >&2
+            exit 1
+          fi
+          printf "%s\n" "$commit" > FLINT_SOURCE_COMMIT
+          echo "FLINT_SOURCE_COMMIT=$commit" >> "$GITHUB_ENV"
+          cat FLINT_SOURCE_COMMIT
+
+      - name: Cache macOS FLINT install
+        if: ${{ inputs.use_macos_cache }}
+        uses: actions/cache@v4
+        with:
+          path: vendor/flint
+          key: ${{ runner.os }}-${{ runner.arch }}-flint-${{ inputs.macos_flint_ref }}-${{ hashFiles('FLINT_SOURCE_COMMIT', 'deps/flint/install-darwin-arm64.sh') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-flint-${{ inputs.macos_flint_ref }}-
+            ${{ runner.os }}-${{ runner.arch }}-flint-
+
+      - name: Install macOS FLINT dependency
+        env:
+          PLATFORM: darwin-arm64
+          FLINT_REPO: ${{ inputs.macos_flint_repo }}
+          FLINT_REF: ${{ inputs.macos_flint_ref }}
+          FLINT_SOURCE_COMMIT: ${{ env.FLINT_SOURCE_COMMIT }}
+        run: |
+          bash deps/flint/install-darwin-arm64.sh vendor/flint
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          uname -a
+          xcodebuild -version || true
+          clang --version || true
+          rustc --version || true
+          cargo --version || true
+          go version || true
+          uniffi-bindgen-go --version || true
+          brew --prefix gmp
+          brew --prefix mpfr
+          brew --prefix openssl@3
+          test -f "$GITHUB_WORKSPACE/vendor/flint/lib/libflint.a"
+          rustup target add aarch64-apple-darwin
+
+      - name: Build node
+        env:
+          CARGO_INCREMENTAL: "0"
+          UPSTREAM_BASE_VERSION: ${{ inputs.upstream_branch }}
+        run: |
+          set -euo pipefail
+          export GMP_DIR="$(brew --prefix gmp)"
+          export MPFR_DIR="$(brew --prefix mpfr)"
+          export FLINT_DIR="$GITHUB_WORKSPACE/vendor/flint"
+          export OPENSSL_DIR="$(brew --prefix openssl@3)"
+          export PKG_CONFIG_PATH="$OPENSSL_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          ./scripts/build-node.sh darwin-arm64 upstream dist
+
+      - name: Inspect macOS binary
+        run: |
+          set -euo pipefail
+          file dist/node-*
+          otool -L dist/node-* || true
+
+      - name: Write checksums and build info
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 node-* > SHA256SUMS
+          cd ..
+          cat > dist/build-info.json <<EOF
+          {
+            "channel": "dev",
+            "source_type": "quilscan_public_dev_build",
+            "official_release": false,
+            "upstream_repo": "${{ inputs.upstream_repo }}",
+            "upstream_branch": "${{ inputs.upstream_branch }}",
+            "upstream_commit": "$(cat UPSTREAM_COMMIT)",
+            "platform": "${{ inputs.platform }}",
+            "macos_flint_source_repo": "${{ inputs.macos_flint_repo }}",
+            "macos_flint_source_ref": "${{ inputs.macos_flint_ref }}",
+            "macos_flint_source_commit": "$(cat FLINT_SOURCE_COMMIT)",
+            "use_macos_cache": ${{ inputs.use_macos_cache }},
+            "workflow_run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }
+          EOF
+          cat dist/build-info.json
+          cat dist/SHA256SUMS
+
+      - name: Sign node binary
+        env:
+          DEV_NODE_SIGNING_PRIVATE_KEY: ${{ secrets.DEV_NODE_SIGNING_PRIVATE_KEY }}
+        run: |
+          go run ./cmd/dev-node-sign \
+            -checksums dist/SHA256SUMS \
+            -out-dir dist
+          cat dist/node-*.sig
+          cat dist/public-key.txt
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-node-darwin-arm64
+          path: |
+            dist/node-*
+            dist/SHA256SUMS
+            dist/build-info.json
+            dist/public-key.txt
+          if-no-files-found: error
