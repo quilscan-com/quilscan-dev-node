@@ -114,14 +114,9 @@ jobs:
               git remote set-url origin "$UPSTREAM_REPO"
               git lfs install --local --force
               git reset --hard
-              git fetch origin "$UPSTREAM_BRANCH"
-              if git show-ref --verify --quiet "refs/heads/$UPSTREAM_BRANCH"; then
-                git checkout "$UPSTREAM_BRANCH"
-              else
-                git checkout -B "$UPSTREAM_BRANCH" "origin/$UPSTREAM_BRANCH"
-              fi
-              git reset --hard
-              git pull --ff-only origin "$UPSTREAM_BRANCH"
+              git fetch origin "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/origin/${UPSTREAM_BRANCH}"
+              git checkout -B "$UPSTREAM_BRANCH" "refs/remotes/origin/${UPSTREAM_BRANCH}"
+              git reset --hard "refs/remotes/origin/${UPSTREAM_BRANCH}"
               git lfs pull
               git rev-parse HEAD > /out/UPSTREAM_COMMIT
               quilscan-build-node-linux-official-local .
