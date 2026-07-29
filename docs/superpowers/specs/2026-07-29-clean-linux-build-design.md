@@ -16,8 +16,10 @@ replace the Linux build steps on the `test` branch with a clean build:
 3. Install a pinned Go Task release.
 4. Clone the requested upstream repository and branch into a new directory.
 5. Pull Git LFS objects and record the exact upstream commit.
-6. Run `task build_node_amd64_linux` from the upstream checkout.
-7. Package, checksum, sign, and upload the resulting binary using the existing
+6. Replace only the unreachable `gmplib.org` GMP download URL in the upstream
+   Dockerfile with the official GNU mirror at `ftp.gnu.org`.
+7. Run `task build_node_amd64_linux` from the upstream checkout.
+8. Package, checksum, sign, and upload the resulting binary using the existing
    release steps.
 
 The macOS build remains unchanged.
@@ -36,8 +38,9 @@ The workflow continues accepting `upstream_repo`, `upstream_branch`, and
 `platform`. The Linux artifact naming, build metadata, checksums, signing, and
 artifact upload format remain compatible with the current publishing pipeline.
 
-The build metadata will identify the exact upstream commit and workflow run. It
-will no longer claim a warm-builder URL for clean Linux builds.
+The build metadata will identify the exact upstream commit, workflow run, clean
+build method, and GMP mirror URL. It will no longer claim a warm-builder URL for
+clean Linux builds.
 
 ## Failure Handling
 

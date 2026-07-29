@@ -63,9 +63,21 @@ Add this step after `actions/setup-go`:
 
 - [ ] **Step 4: Invoke the official upstream Task**
 
-Replace the signed warm-builder download and Docker run with:
+Replace the signed warm-builder download and Docker run. Before invoking Task,
+replace only the unavailable upstream GMP host with the official GNU mirror:
 
 ```yaml
+      - name: Use reachable GNU GMP mirror
+        run: |
+          set -euo pipefail
+          cd upstream
+          gmp_dockerfile="docker/Dockerfile.source"
+          grep -Fq "https://gmplib.org/download/gmp/" "$gmp_dockerfile"
+          sed -i \
+            "s#https://gmplib.org/download/gmp/#https://ftp.gnu.org/gnu/gmp/#" \
+            "$gmp_dockerfile"
+          grep -Fq "https://ftp.gnu.org/gnu/gmp/" "$gmp_dockerfile"
+
       - name: Build node with official upstream Task
         run: |
           set -euo pipefail
@@ -84,7 +96,8 @@ Update the existing packaging step to copy `clean-output/node`.
 Replace the Linux build-info warm-builder field with:
 
 ```json
-"linux_build_method": "fresh_github_runner_official_task"
+"linux_build_method": "fresh_github_runner_official_task",
+"gmp_source_url": "https://ftp.gnu.org/gnu/gmp/"
 ```
 
 Keep `upstream_repo`, `upstream_branch`, `upstream_commit`, platform, workflow

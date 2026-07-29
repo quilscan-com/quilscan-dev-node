@@ -102,6 +102,17 @@ jobs:
           git rev-parse HEAD > ../UPSTREAM_COMMIT
           git status --short
 
+      - name: Use reachable GNU GMP mirror
+        run: |
+          set -euo pipefail
+          cd upstream
+          gmp_dockerfile="docker/Dockerfile.source"
+          grep -Fq "https://gmplib.org/download/gmp/" "$gmp_dockerfile"
+          sed -i \
+            "s#https://gmplib.org/download/gmp/#https://ftp.gnu.org/gnu/gmp/#" \
+            "$gmp_dockerfile"
+          grep -Fq "https://ftp.gnu.org/gnu/gmp/" "$gmp_dockerfile"
+
       - name: Build node with official upstream Task
         run: |
           set -euo pipefail
@@ -149,6 +160,7 @@ jobs:
             "upstream_commit": "$(cat UPSTREAM_COMMIT)",
             "platform": "${{ inputs.platform }}",
             "linux_build_method": "fresh_github_runner_official_task",
+            "gmp_source_url": "https://ftp.gnu.org/gnu/gmp/",
             "workflow_run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           }
           EOF
