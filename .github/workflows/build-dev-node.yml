@@ -63,6 +63,14 @@ jobs:
         with:
           go-version: "1.22"
 
+      - name: Install Task
+        run: |
+          set -euo pipefail
+          go install github.com/go-task/task/v3/cmd/task@v3.39.2
+          task_bin="$(go env GOPATH)/bin"
+          echo "$task_bin" >> "$GITHUB_PATH"
+          "$task_bin/task" --version
+
       - name: Free runner disk space
         run: |
           set -euo pipefail
@@ -80,50 +88,29 @@ jobs:
           echo "Disk after cleanup:"
           df -h
 
-      - name: Install signed builder archive tools
+      - name: Checkout upstream
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y zstd
+          git clone \
+            --branch "${{ inputs.upstream_branch }}" \
+            --single-branch \
+            "${{ inputs.upstream_repo }}" \
+            upstream
+          cd upstream
+          git lfs install --local
+          git lfs pull
+          git rev-parse HEAD > ../UPSTREAM_COMMIT
+          git status --short
 
-      - name: Download signed Linux warm builder image
-        env:
-          PLATFORM: linux-amd64
-          LINUX_WARM_BUILDER_IMAGE_TAG: quilibrium-linux-warm-builder:linux-amd64-v1
-        run: |
-          bash deps/linux-warm-builder/download-signed.sh "${{ inputs.linux_warm_builder_base_url }}" linux-warm-builder-download
-
-      - name: Build node with signed Linux warm builder
-        env:
-          LINUX_WARM_BUILDER_IMAGE_TAG: quilibrium-linux-warm-builder:linux-amd64-v1
-          UPSTREAM_REPO: ${{ inputs.upstream_repo }}
-          UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
+      - name: Build node with official upstream Task
         run: |
           set -euo pipefail
-          mkdir -p warm-output
-          docker run --rm \
-            --platform linux/amd64 \
-            --ulimit stack=-1:-1 \
-            -e UPSTREAM_REPO \
-            -e UPSTREAM_BRANCH \
-            -v "$PWD/warm-output:/out" \
-            "$LINUX_WARM_BUILDER_IMAGE_TAG" \
-            bash -lc '
-              set -euo pipefail
-              cd /opt/monorepo
-              git remote set-url origin "$UPSTREAM_REPO"
-              git lfs install --local --force
-              git reset --hard
-              git fetch origin "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/origin/${UPSTREAM_BRANCH}"
-              git checkout -B "$UPSTREAM_BRANCH" "refs/remotes/origin/${UPSTREAM_BRANCH}"
-              git reset --hard "refs/remotes/origin/${UPSTREAM_BRANCH}"
-              git lfs pull
-              git rev-parse HEAD > /out/UPSTREAM_COMMIT
-              quilscan-build-node-linux-official-local .
-              cp node/build/amd64_linux/node /out/node
-              chmod +x /out/node
-            '
-          cp warm-output/UPSTREAM_COMMIT UPSTREAM_COMMIT
+          cd upstream
+          task build_node_amd64_linux
+          test -x node/build/amd64_linux/node
+          mkdir -p ../clean-output
+          cp node/build/amd64_linux/node ../clean-output/node
+          chmod +x ../clean-output/node
 
       - name: Show upstream revision
         run: |
@@ -132,7 +119,7 @@ jobs:
           echo "upstream_branch=${{ inputs.upstream_branch }}"
           echo "upstream_commit=$(cat UPSTREAM_COMMIT)"
 
-      - name: Package node from warm builder
+      - name: Package node from clean build
         env:
           UPSTREAM_BASE_VERSION: ${{ inputs.upstream_branch }}
         run: |
@@ -142,7 +129,7 @@ jobs:
           short_commit="${upstream_commit:0:7}"
           base_version="${UPSTREAM_BASE_VERSION#v}"
           name="node-${base_version}-${short_commit}-linux-amd64"
-          cp warm-output/node "dist/$name"
+          cp clean-output/node "dist/$name"
           chmod +x "dist/$name"
           echo "built $PWD/dist/$name"
 
@@ -161,7 +148,7 @@ jobs:
             "upstream_branch": "${{ inputs.upstream_branch }}",
             "upstream_commit": "$(cat UPSTREAM_COMMIT)",
             "platform": "${{ inputs.platform }}",
-            "linux_warm_builder_base_url": "${{ inputs.linux_warm_builder_base_url }}",
+            "linux_build_method": "fresh_github_runner_official_task",
             "workflow_run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           }
           EOF

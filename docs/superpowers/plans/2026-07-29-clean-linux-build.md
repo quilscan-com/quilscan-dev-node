@@ -95,7 +95,7 @@ run URL, checksums, signature, and public key unchanged.
 Run:
 
 ```bash
-ruby -e 'require "yaml"; YAML.load_file(".github/workflows/build-dev-node.yml", aliases: true); puts "yaml ok"'
+ruby -e 'require "yaml"; YAML.parse_file(".github/workflows/build-dev-node.yml"); puts "yaml ok"'
 rg -n "task build_node_amd64_linux|clean-output/node|fresh_github_runner_official_task" \
   .github/workflows/build-dev-node.yml
 if sed -n '52,190p' .github/workflows/build-dev-node.yml |
