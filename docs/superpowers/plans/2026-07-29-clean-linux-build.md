@@ -56,7 +56,9 @@ Add this step after `actions/setup-go`:
         run: |
           set -euo pipefail
           go install github.com/go-task/task/v3/cmd/task@v3.39.2
-          task --version
+          task_bin="$(go env GOPATH)/bin"
+          echo "$task_bin" >> "$GITHUB_PATH"
+          "$task_bin/task" --version
 ```
 
 - [ ] **Step 4: Invoke the official upstream Task**
