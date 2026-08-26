@@ -203,11 +203,33 @@ jobs:
           go-version: "1.22"
 
       - name: Checkout upstream
+        env:
+          LFS_MIRROR_URL: https://releases.quilscan.com/deps/quilibrium-lfs/sha256/d753cfdba1dcd0b6341867e17ab4cd364b9eca6710f5fef621193c72ebe5a89b/mainnet_244200_seniority.json
+          LFS_EXPECTED_SHA256: d753cfdba1dcd0b6341867e17ab4cd364b9eca6710f5fef621193c72ebe5a89b
+          LFS_EXPECTED_SIZE: "210578419"
         run: |
+          set -euo pipefail
+          export GIT_LFS_SKIP_SMUDGE=1
           git clone --branch "${{ inputs.upstream_branch }}" --single-branch "${{ inputs.upstream_repo }}" upstream
           cd upstream
           git lfs install --local
-          git lfs pull
+
+          lfs_path="node/execution/intrinsics/global/compat/mainnet_244200_seniority.json"
+          pointer_sha256="$(sed -n 's/^oid sha256://p' "$lfs_path")"
+          pointer_size="$(sed -n 's/^size //p' "$lfs_path")"
+          test "$pointer_sha256" = "$LFS_EXPECTED_SHA256"
+          test "$pointer_size" = "$LFS_EXPECTED_SIZE"
+
+          download_path="${lfs_path}.download"
+          trap 'rm -f "$download_path"' EXIT
+          curl -fL --retry 3 --connect-timeout 20 --max-time 600 \
+            "$LFS_MIRROR_URL" \
+            -o "$download_path"
+          test "$(stat -f %z "$download_path")" = "$LFS_EXPECTED_SIZE"
+          test "$(shasum -a 256 "$download_path" | awk '{print $1}')" = "$LFS_EXPECTED_SHA256"
+          mv "$download_path" "$lfs_path"
+          trap - EXIT
+
           git rev-parse HEAD > ../UPSTREAM_COMMIT
           git status --short
 
