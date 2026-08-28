@@ -97,7 +97,9 @@ jobs:
             echo "upstream_commit must be a full hexadecimal Git commit SHA" >&2
             exit 1
           fi
-          if ! [[ "$INPUT_SUBPATCH" =~ ^[1-9][0-9]*$ ]] || (( INPUT_SUBPATCH > 2147483647 )); then
+          if ! [[ "$INPUT_SUBPATCH" =~ ^[1-9][0-9]*$ ]] ||
+             (( ${#INPUT_SUBPATCH} > 10 )) ||
+             { (( ${#INPUT_SUBPATCH} == 10 )) && [[ "$INPUT_SUBPATCH" > "2147483647" ]]; }; then
             echo "subpatch must be between 1 and 2147483647" >&2
             exit 1
           fi
@@ -283,7 +285,9 @@ jobs:
             echo "upstream_commit must be a full hexadecimal Git commit SHA" >&2
             exit 1
           fi
-          if ! [[ "$INPUT_SUBPATCH" =~ ^[1-9][0-9]*$ ]] || (( INPUT_SUBPATCH > 2147483647 )); then
+          if ! [[ "$INPUT_SUBPATCH" =~ ^[1-9][0-9]*$ ]] ||
+             (( ${#INPUT_SUBPATCH} > 10 )) ||
+             { (( ${#INPUT_SUBPATCH} == 10 )) && [[ "$INPUT_SUBPATCH" > "2147483647" ]]; }; then
             echo "subpatch must be between 1 and 2147483647" >&2
             exit 1
           fi
