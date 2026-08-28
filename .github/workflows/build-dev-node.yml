@@ -20,6 +20,18 @@ on:
         description: "Official upstream branch to build"
         required: true
         default: "v2.1.0.23"
+      upstream_commit:
+        description: "Exact official upstream commit"
+        required: true
+        type: string
+      subpatch:
+        description: "Official subpatch number"
+        required: true
+        type: string
+      release_version:
+        description: "Exact Quilscan dev release version"
+        required: true
+        type: string
       platform:
         description: "Target platform"
         required: true
@@ -63,6 +75,49 @@ jobs:
         with:
           go-version: "1.22"
 
+      - name: Validate official build target
+        env:
+          INPUT_UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+          INPUT_UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
+          INPUT_UPSTREAM_COMMIT: ${{ inputs.upstream_commit }}
+          INPUT_SUBPATCH: ${{ inputs.subpatch }}
+          INPUT_RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$INPUT_UPSTREAM_REPO" =~ ^https://github\.com/[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}(\.git)?$ ]]; then
+            echo "upstream_repo must be a GitHub HTTPS repository URL" >&2
+            exit 1
+          fi
+          if ! [[ "$INPUT_UPSTREAM_BRANCH" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
+            echo "upstream_branch contains unsupported characters" >&2
+            exit 1
+          fi
+          normalized_commit="$(printf '%s' "$INPUT_UPSTREAM_COMMIT" | tr '[:upper:]' '[:lower:]')"
+          if ! [[ "$normalized_commit" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]; then
+            echo "upstream_commit must be a full hexadecimal Git commit SHA" >&2
+            exit 1
+          fi
+          if ! [[ "$INPUT_SUBPATCH" =~ ^[1-9][0-9]*$ ]] || (( INPUT_SUBPATCH > 2147483647 )); then
+            echo "subpatch must be between 1 and 2147483647" >&2
+            exit 1
+          fi
+          if ! [[ "$INPUT_RELEASE_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$ ]]; then
+            echo "release_version contains unsupported characters" >&2
+            exit 1
+          fi
+          expected_release="${INPUT_UPSTREAM_BRANCH}.${INPUT_SUBPATCH}"
+          if [[ "$INPUT_RELEASE_VERSION" != "$expected_release" ]]; then
+            echo "release_version must equal $expected_release" >&2
+            exit 1
+          fi
+          {
+            echo "OFFICIAL_UPSTREAM_REPO=$INPUT_UPSTREAM_REPO"
+            echo "OFFICIAL_UPSTREAM_BRANCH=$INPUT_UPSTREAM_BRANCH"
+            echo "OFFICIAL_UPSTREAM_COMMIT=$normalized_commit"
+            echo "OFFICIAL_SUBPATCH=$INPUT_SUBPATCH"
+            echo "OFFICIAL_RELEASE_VERSION=$INPUT_RELEASE_VERSION"
+          } >> "$GITHUB_ENV"
+
       - name: Free runner disk space
         run: |
           set -euo pipefail
@@ -96,27 +151,28 @@ jobs:
       - name: Build node with signed Linux warm builder
         env:
           LINUX_WARM_BUILDER_IMAGE_TAG: quilibrium-linux-warm-builder:linux-amd64-v1
-          UPSTREAM_REPO: ${{ inputs.upstream_repo }}
-          UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
         run: |
           set -euo pipefail
           mkdir -p warm-output
           docker run --rm \
             --platform linux/amd64 \
             --ulimit stack=-1:-1 \
-            -e UPSTREAM_REPO \
-            -e UPSTREAM_BRANCH \
+            -e OFFICIAL_UPSTREAM_REPO \
+            -e OFFICIAL_UPSTREAM_BRANCH \
+            -e OFFICIAL_UPSTREAM_COMMIT \
             -v "$PWD/warm-output:/out" \
             "$LINUX_WARM_BUILDER_IMAGE_TAG" \
             bash -lc '
               set -euo pipefail
               cd /opt/monorepo
-              git remote set-url origin "$UPSTREAM_REPO"
+              git remote set-url origin "$OFFICIAL_UPSTREAM_REPO"
               git lfs install --local --force
               git reset --hard
-              git fetch origin "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/origin/${UPSTREAM_BRANCH}"
-              git checkout -B "$UPSTREAM_BRANCH" "refs/remotes/origin/${UPSTREAM_BRANCH}"
-              git reset --hard "refs/remotes/origin/${UPSTREAM_BRANCH}"
+              git fetch origin "+refs/heads/${OFFICIAL_UPSTREAM_BRANCH}:refs/remotes/origin/${OFFICIAL_UPSTREAM_BRANCH}"
+              git fetch origin "$OFFICIAL_UPSTREAM_COMMIT"
+              git checkout --detach FETCH_HEAD
+              test "$(git rev-parse HEAD)" = "$OFFICIAL_UPSTREAM_COMMIT"
+              git merge-base --is-ancestor "$OFFICIAL_UPSTREAM_COMMIT" "refs/remotes/origin/${OFFICIAL_UPSTREAM_BRANCH}"
               git lfs pull
               git rev-parse HEAD > /out/UPSTREAM_COMMIT
               quilscan-build-node-linux-official-local .
@@ -128,25 +184,25 @@ jobs:
       - name: Show upstream revision
         run: |
           set -euo pipefail
-          echo "upstream_repo=${{ inputs.upstream_repo }}"
-          echo "upstream_branch=${{ inputs.upstream_branch }}"
+          echo "upstream_repo=$OFFICIAL_UPSTREAM_REPO"
+          echo "upstream_branch=$OFFICIAL_UPSTREAM_BRANCH"
           echo "upstream_commit=$(cat UPSTREAM_COMMIT)"
 
       - name: Package node from warm builder
-        env:
-          UPSTREAM_BASE_VERSION: ${{ inputs.upstream_branch }}
         run: |
           set -euo pipefail
           mkdir -p dist
           upstream_commit="$(cat UPSTREAM_COMMIT)"
           short_commit="${upstream_commit:0:7}"
-          base_version="${UPSTREAM_BASE_VERSION#v}"
+          base_version="${OFFICIAL_UPSTREAM_BRANCH#v}"
           name="node-${base_version}-${short_commit}-linux-amd64"
           cp warm-output/node "dist/$name"
           chmod +x "dist/$name"
           echo "built $PWD/dist/$name"
 
       - name: Write checksums and build info
+        env:
+          LINUX_WARM_BUILDER_BASE_URL: ${{ inputs.linux_warm_builder_base_url }}
         run: |
           set -euo pipefail
           cd dist
@@ -157,14 +213,17 @@ jobs:
             "channel": "dev",
             "source_type": "quilscan_public_dev_build",
             "official_release": false,
-            "upstream_repo": "${{ inputs.upstream_repo }}",
-            "upstream_branch": "${{ inputs.upstream_branch }}",
+            "upstream_repo": "$OFFICIAL_UPSTREAM_REPO",
+            "upstream_branch": "$OFFICIAL_UPSTREAM_BRANCH",
             "upstream_commit": "$(cat UPSTREAM_COMMIT)",
+            "subpatch": $OFFICIAL_SUBPATCH,
+            "release_version": "$OFFICIAL_RELEASE_VERSION",
             "platform": "${{ inputs.platform }}",
-            "linux_warm_builder_base_url": "${{ inputs.linux_warm_builder_base_url }}",
+            "linux_warm_builder_base_url": "$LINUX_WARM_BUILDER_BASE_URL",
             "workflow_run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           }
           EOF
+          python3 -m json.tool dist/build-info.json >/dev/null
           cat dist/build-info.json
           cat dist/SHA256SUMS
 
@@ -202,6 +261,49 @@ jobs:
         with:
           go-version: "1.22"
 
+      - name: Validate official build target
+        env:
+          INPUT_UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+          INPUT_UPSTREAM_BRANCH: ${{ inputs.upstream_branch }}
+          INPUT_UPSTREAM_COMMIT: ${{ inputs.upstream_commit }}
+          INPUT_SUBPATCH: ${{ inputs.subpatch }}
+          INPUT_RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$INPUT_UPSTREAM_REPO" =~ ^https://github\.com/[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}(\.git)?$ ]]; then
+            echo "upstream_repo must be a GitHub HTTPS repository URL" >&2
+            exit 1
+          fi
+          if ! [[ "$INPUT_UPSTREAM_BRANCH" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
+            echo "upstream_branch contains unsupported characters" >&2
+            exit 1
+          fi
+          normalized_commit="$(printf '%s' "$INPUT_UPSTREAM_COMMIT" | tr '[:upper:]' '[:lower:]')"
+          if ! [[ "$normalized_commit" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]; then
+            echo "upstream_commit must be a full hexadecimal Git commit SHA" >&2
+            exit 1
+          fi
+          if ! [[ "$INPUT_SUBPATCH" =~ ^[1-9][0-9]*$ ]] || (( INPUT_SUBPATCH > 2147483647 )); then
+            echo "subpatch must be between 1 and 2147483647" >&2
+            exit 1
+          fi
+          if ! [[ "$INPUT_RELEASE_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$ ]]; then
+            echo "release_version contains unsupported characters" >&2
+            exit 1
+          fi
+          expected_release="${INPUT_UPSTREAM_BRANCH}.${INPUT_SUBPATCH}"
+          if [[ "$INPUT_RELEASE_VERSION" != "$expected_release" ]]; then
+            echo "release_version must equal $expected_release" >&2
+            exit 1
+          fi
+          {
+            echo "OFFICIAL_UPSTREAM_REPO=$INPUT_UPSTREAM_REPO"
+            echo "OFFICIAL_UPSTREAM_BRANCH=$INPUT_UPSTREAM_BRANCH"
+            echo "OFFICIAL_UPSTREAM_COMMIT=$normalized_commit"
+            echo "OFFICIAL_SUBPATCH=$INPUT_SUBPATCH"
+            echo "OFFICIAL_RELEASE_VERSION=$INPUT_RELEASE_VERSION"
+          } >> "$GITHUB_ENV"
+
       - name: Checkout upstream
         env:
           LFS_MIRROR_URL: https://releases.quilscan.com/deps/quilibrium-lfs/sha256/d753cfdba1dcd0b6341867e17ab4cd364b9eca6710f5fef621193c72ebe5a89b/mainnet_244200_seniority.json
@@ -210,8 +312,13 @@ jobs:
         run: |
           set -euo pipefail
           export GIT_LFS_SKIP_SMUDGE=1
-          git clone --branch "${{ inputs.upstream_branch }}" --single-branch "${{ inputs.upstream_repo }}" upstream
+          git clone --branch "$OFFICIAL_UPSTREAM_BRANCH" --single-branch "$OFFICIAL_UPSTREAM_REPO" upstream
           cd upstream
+          git fetch origin "$OFFICIAL_UPSTREAM_COMMIT"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$OFFICIAL_UPSTREAM_COMMIT"
+          git fetch origin "+refs/heads/$OFFICIAL_UPSTREAM_BRANCH:refs/remotes/origin/$OFFICIAL_UPSTREAM_BRANCH"
+          git merge-base --is-ancestor "$OFFICIAL_UPSTREAM_COMMIT" "refs/remotes/origin/$OFFICIAL_UPSTREAM_BRANCH"
           git lfs install --local
 
           lfs_path="node/execution/intrinsics/global/compat/mainnet_244200_seniority.json"
@@ -236,8 +343,8 @@ jobs:
       - name: Show upstream revision
         run: |
           set -euo pipefail
-          echo "upstream_repo=${{ inputs.upstream_repo }}"
-          echo "upstream_branch=${{ inputs.upstream_branch }}"
+          echo "upstream_repo=$OFFICIAL_UPSTREAM_REPO"
+          echo "upstream_branch=$OFFICIAL_UPSTREAM_BRANCH"
           echo "upstream_commit=$(cat UPSTREAM_COMMIT)"
 
       - name: Cache Homebrew downloads
@@ -397,9 +504,9 @@ jobs:
       - name: Build node
         env:
           CARGO_INCREMENTAL: "0"
-          UPSTREAM_BASE_VERSION: ${{ inputs.upstream_branch }}
         run: |
           set -euo pipefail
+          export UPSTREAM_BASE_VERSION="$OFFICIAL_UPSTREAM_BRANCH"
           export GMP_DIR="$(brew --prefix gmp)"
           export MPFR_DIR="$(brew --prefix mpfr)"
           export FLINT_DIR="$GITHUB_WORKSPACE/vendor/flint"
@@ -414,6 +521,9 @@ jobs:
           otool -L dist/node-* || true
 
       - name: Write checksums and build info
+        env:
+          MACOS_FLINT_REPO: ${{ inputs.macos_flint_repo }}
+          MACOS_FLINT_REF: ${{ inputs.macos_flint_ref }}
         run: |
           set -euo pipefail
           cd dist
@@ -424,17 +534,20 @@ jobs:
             "channel": "dev",
             "source_type": "quilscan_public_dev_build",
             "official_release": false,
-            "upstream_repo": "${{ inputs.upstream_repo }}",
-            "upstream_branch": "${{ inputs.upstream_branch }}",
+            "upstream_repo": "$OFFICIAL_UPSTREAM_REPO",
+            "upstream_branch": "$OFFICIAL_UPSTREAM_BRANCH",
             "upstream_commit": "$(cat UPSTREAM_COMMIT)",
+            "subpatch": $OFFICIAL_SUBPATCH,
+            "release_version": "$OFFICIAL_RELEASE_VERSION",
             "platform": "${{ inputs.platform }}",
-            "macos_flint_source_repo": "${{ inputs.macos_flint_repo }}",
-            "macos_flint_source_ref": "${{ inputs.macos_flint_ref }}",
+            "macos_flint_source_repo": "$MACOS_FLINT_REPO",
+            "macos_flint_source_ref": "$MACOS_FLINT_REF",
             "macos_flint_source_commit": "$(cat FLINT_SOURCE_COMMIT)",
             "use_macos_cache": ${{ inputs.use_macos_cache }},
             "workflow_run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           }
           EOF
+          python3 -m json.tool dist/build-info.json >/dev/null
           cat dist/build-info.json
           cat dist/SHA256SUMS
 
