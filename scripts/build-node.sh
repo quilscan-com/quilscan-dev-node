@@ -11,14 +11,7 @@ mkdir -p "$dist_dir"
 dist_dir="$(cd "$dist_dir" && pwd)"
 
 run_official_macos_node_build() {
-  vdf/generate.sh
-  bls48581/generate.sh
-  verenc/generate.sh
-  bulletproofs/generate.sh
-  ferret/generate.sh
-  channel/generate.sh
-  rpm/generate.sh
-  node/build.sh -o build/arm64_macos/node
+  node/build.sh
 }
 
 cd "$repo_dir"
